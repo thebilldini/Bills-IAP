@@ -38,6 +38,15 @@ class SoundPlayer:
             'sounds/sound5.wav'
         ]
         
+        # Track-specific playback configuration
+        self.track_config = {
+            0: {'mode': 'interrupt', 'self': 'ignore', 'priority': 3},    # Button 1
+            1: {'mode': 'interrupt', 'self': 'ignore', 'priority': 1},       # Button 2
+            2: {'mode': 'overlay', 'self': 'restart', 'priority': 2},    # Button 3
+            3: {'mode': 'overlay', 'self': 'queue', 'priority': 1},        # Button 4
+            4: {'mode': 'exclusive', 'self': 'ignore', 'priority': 5}      # Button 5
+        }
+        
         # Initialize pygame mixer for sound playback
         pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
         
@@ -50,8 +59,13 @@ class SoundPlayer:
         # Track button states to prevent multiple triggers
         self.button_states = [True] * 5  # True = not pressed (pull-up)
         
+        # Track currently playing sounds
+        self.currently_playing = {}  # {button_index: pygame.mixer.Channel}
+        self.sound_channels = []     # List to store pygame channels
+        
         print("GPIO Sound Player initialized!")
         print("Button GPIO pins:", self.button_pins)
+        print("Track configurations loaded")
         print("Press Ctrl+C to exit")
     
     def setup_gpio(self):
@@ -87,13 +101,83 @@ class SoundPlayer:
                 print(f"Warning: {sound_file} not found")
                 self.sounds.append(None)
     
+    def stop_all_sounds(self):
+        """Stop all currently playing sounds"""
+        pygame.mixer.stop()
+        self.currently_playing.clear()
+        print("Stopped all sounds")
+    
+    def stop_lower_priority_sounds(self, priority):
+        """Stop sounds with lower priority than the given priority"""
+        to_remove = []
+        for btn_idx, channel in self.currently_playing.items():
+            if channel.get_busy():  # Still playing
+                btn_priority = self.track_config[btn_idx].get('priority', 1)
+                if btn_priority < priority:
+                    channel.stop()
+                    to_remove.append(btn_idx)
+        
+        for btn_idx in to_remove:
+            del self.currently_playing[btn_idx]
+            print(f"Stopped lower priority sound {btn_idx + 1}")
+    
+    def is_anything_playing(self):
+        """Check if any sounds are currently playing"""
+        # Clean up finished sounds
+        to_remove = []
+        for btn_idx, channel in self.currently_playing.items():
+            if not channel.get_busy():
+                to_remove.append(btn_idx)
+        
+        for btn_idx in to_remove:
+            del self.currently_playing[btn_idx]
+        
+        return len(self.currently_playing) > 0
+    
     def play_sound(self, button_index):
-        """Play sound for the specified button"""
-        if button_index < len(self.sounds) and self.sounds[button_index]:
-            print(f"Playing sound {button_index + 1}: {self.sound_files[button_index]}")
-            self.sounds[button_index].play()
-        else:
+        """Play sound for the specified button with configuration rules"""
+        if button_index >= len(self.sounds) or not self.sounds[button_index]:
             print(f"No sound available for button {button_index + 1}")
+            return
+        
+        config = self.track_config.get(button_index, {'mode': 'overlay', 'self': 'restart', 'priority': 1})
+        mode = config.get('mode', 'overlay')
+        self_behavior = config.get('self', 'restart')
+        priority = config.get('priority', 1)
+        
+        print(f"Button {button_index + 1} pressed - Mode: {mode}, Priority: {priority}")
+        
+        # Check if this same button is already playing
+        if button_index in self.currently_playing:
+            channel = self.currently_playing[button_index]
+            if channel.get_busy():  # Still playing
+                if self_behavior == 'ignore':
+                    print(f"Button {button_index + 1} already playing, ignoring")
+                    return
+                elif self_behavior == 'restart':
+                    channel.stop()
+                    print(f"Restarting sound {button_index + 1}")
+                # queue behavior would be handled here (more complex)
+        
+        # Handle interaction with other sounds
+        if mode == 'interrupt':
+            self.stop_all_sounds()
+            print(f"Button {button_index + 1} interrupting all sounds")
+        elif mode == 'exclusive':
+            if self.is_anything_playing():
+                print(f"Button {button_index + 1} blocked - other sounds playing")
+                return
+        elif mode == 'overlay':
+            # Stop lower priority sounds only
+            self.stop_lower_priority_sounds(priority)
+        
+        # Play the sound
+        channel = self.sounds[button_index].play()
+        if channel:
+            self.currently_playing[button_index] = channel
+            print(f"Playing sound {button_index + 1}: {self.sound_files[button_index]}")
+        else:
+            print(f"Failed to play sound {button_index + 1} - no available channels")
     
     def check_buttons(self):
         """Check button states and play sounds when pressed"""
